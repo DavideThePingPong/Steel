@@ -1213,32 +1213,51 @@
             return CONSTANTS.PHI.COMPRESSION * Nc;
         }
 
-        // Calculate member deflection (simplified formulas)
-        function calculateDeflection(section, steelGrade = 'AS3679-300', length = 3000, load = 1, loadType = 'uniform') {
+        // Calculate member deflection (consistent SI units)
+        function calculateDeflection(section, steelGrade = '300', length = 3000, load = 1, loadType = 'uniform') {
             if (!section) return 0;
-            const E = (CONSTANTS.STEEL_GRADE[steelGrade] || CONSTANTS.STEEL_GRADE['AS3679-300']).E;
-            const I = section.Ix || 1;
-            let deflection = 0;
-            const w = load; // uniform load intensity (kN/m) expected, or point load magnitude in kN
+
+            // steelGrade lookup: allow keys like "300" or "AS3679-300"
+            let gradeKey = Object.keys(CONSTANTS.STEEL_GRADE).find(k => steelGrade === k || steelGrade.includes(k));
+            if (!gradeKey) {
+                gradeKey = Object.keys(CONSTANTS.STEEL_GRADE)[0]; // fallback
+            }
+            const gradeProps = CONSTANTS.STEEL_GRADE[gradeKey] || CONSTANTS.STEEL_GRADE[Object.keys(CONSTANTS.STEEL_GRADE)[0]];
+            const E_mp = gradeProps.E || 200000; // E in N/mm^2 (MPa) expected in constants
+
+            // Convert units:
+            // E (N/mm^2) -> N/m^2 = E_mp * 1e6
+            const E_N_per_m2 = E_mp * 1e6;
+
+            // I in mm^4 -> m^4
+            const I_m4 = (section.Ix || 1) * 1e-12;
+
+            // length in mm -> m
+            const L_m = length / 1000;
+
+            let deflection_m = 0;
 
             if (loadType === 'uniform') {
-                // w in kN/m, length in mm -> convert length to m for formula consistency
-                const Lm = length / 1000;
-                deflection = 5 * w * Math.pow(Lm, 4) / (384 * E * (I / 1e12)); // convert I mm^4 -> m^4
-                deflection = deflection * 1000; // result in mm
+                // load is expected as kN/m -> convert to N/m
+                const w_N_per_m = load * 1000;
+                // δ = 5 w L^4 / (384 E I)
+                deflection_m = (5 * w_N_per_m * Math.pow(L_m, 4)) / (384 * E_N_per_m2 * I_m4);
             } else if (loadType === 'point') {
-                const Lm = length / 1000;
-                deflection = w * Math.pow(Lm, 3) / (48 * E * (I / 1e12));
-                deflection = deflection * 1000;
+                // load is expected as kN -> convert to N
+                const P_N = load * 1000;
+                // midspan point load δ = P L^3 / (48 E I)
+                deflection_m = (P_N * Math.pow(L_m, 3)) / (48 * E_N_per_m2 * I_m4);
             } else if (loadType === 'triangular') {
-                const Lm = length / 1000;
-                deflection = 0.13 * w * Math.pow(Lm, 4) / (E * (I / 1e12));
-                deflection = deflection * 1000;
+                // load is expected as kN/m peak -> convert to N/m
+                const w_N_per_m = load * 1000;
+                // approximate factor used previously (0.13) preserved, but use consistent units
+                deflection_m = (0.13 * w_N_per_m * Math.pow(L_m, 4)) / (E_N_per_m2 * I_m4);
             } else {
-                deflection = 0;
+                deflection_m = 0;
             }
 
-            return Math.abs(deflection);
+            // return mm
+            return Math.abs(deflection_m * 1000);
         }
 
         // Design bolted connection (simplified placeholder)
@@ -1303,8 +1322,15 @@
             }
             
             // Calculate deflection
+            // For uniform loads we must pass load intensity (kN/m). generateResults previously passed total load (kN),
+            // which produced massively inflated deflections. Convert totalShearForce -> w (kN/m) when load is uniform.
+            let deflectionInput = totalShearForce;
+            if ((loadingData.loadType || 'uniform') === 'uniform') {
+                // memberLength in mm -> convert to m for intensity calculation (kN/m)
+                deflectionInput = totalShearForce / (memberLength / 1000); // kN/m
+            }
             const deflection = calculateDeflection(
-                section, steelGrade, memberLength, totalShearForce, loadingData.loadType || 'uniform'
+                section, steelGrade, memberLength, deflectionInput, loadingData.loadType || 'uniform'
             );
             
             // Calculate allowable deflection (typically span/300 for serviceability)
@@ -1647,396 +1673,52 @@
         }
         
         // Update load combinations table
-        function updateLoadCombinations                document.getElementById('point-load-options').classList.toggle('hidden', loadType !== 'point');
-            });
+        function updateLoadCombinations() {
+            const table = document.getElementById('load-combinations-table');
+            if (!table || !loadingData.customCombinations) return;
             
-            // Form validation
-            document.querySelectorAll('input[type="number"]').forEach(function(input) {
-                input.addEventListener('input', validateInput);
-            });
+            // Clear existing rows
+            table.querySelectorAll('tr:not(:first-child)').forEach(row => row.remove());
             
-            // Loading type radio buttons
-            document.querySelectorAll('input[name="loading-type"]').forEach(function(radio) {
-                radio.addEventListener('change', function() {
-                    toggleLoadingType(this.value);
-                });
-            });
-            
-            // Live load type dropdown
-            document.getElementById('live-load-type').addEventListener('change', function() {
-                document.getElementById('custom-live-load').classList.toggle('hidden', this.value !== 'custom');
-            });
-            
-            // Snow load region dropdown
-            document.getElementById('snow-load-region').addEventListener('change', function() {
-                document.getElementById('custom-snow-load').classList.toggle('hidden', this.value !== 'custom');
-            });
-            
-            // Load combination standard dropdown
-            document.getElementById('load-combination-standard').addEventListener('change', function() {
-                document.getElementById('standard-combinations').classList.toggle('hidden', this.value !== 'as1170');
-                document.getElementById('custom-combinations').classList.toggle('hidden', this.value !== 'custom');
-            });
-            
-            // Result view selector
-            document.getElementById('result-view-selector').addEventListener('change', switchResultView);
-        }
-        
-        // Setup drag and drop functionality
-        function setupDragAndDrop() {
-            const dropArea = document.getElementById('drop-area');
-            
-            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-                dropArea.addEventListener(eventName, preventDefaults, false);
-            });
-            
-            function preventDefaults(e) {
-                e.preventDefault();
-                e.stopPropagation();
-            }
-            
-            ['dragenter', 'dragover'].forEach(eventName => {
-                dropArea.addEventListener(eventName, highlight, false);
-            });
-            
-            ['dragleave', 'drop'].forEach(eventName => {
-                dropArea.addEventListener(eventName, unhighlight, false);
-            });
-            
-            function highlight() {
-                dropArea.classList.add('drag-over');
-            }
-            
-            function unhighlight() {
-                dropArea.classList.remove('drag-over');
-            }
-            
-            dropArea.addEventListener('drop', handleDrop, false);
-            
-            function handleDrop(e) {
-                const dt = e.dataTransfer;
-                const files = dt.files;
+            // Add new rows
+            loadingData.customCombinations.forEach((combo, index) => {
+                const row = table.insertRow();
                 
-                if (files.length) {
-                    handleFileUpload({ target: { files: files } });
-                }
-            }
-        }
-        
-        // Set up keyboard navigation
-        function setupKeyboardNavigation() {
-            document.addEventListener('keydown', function(e) {
-                // Enter key for selection
-                if (e.key === 'Enter') {
-                    const focused = document.activeElement;
-                    if (focused && focused.classList.contains('choice-card')) {
-                        focused.click();
-                    }
-                }
+                const comboIndex = row.insertCell(0);
+                const deadFactor = row.insertCell(1);
+                const liveFactor = row.insertCell(2);
+                const windFactor = row.insertCell(3);
+                const snowFactor = row.insertCell(4);
                 
-                // Arrow keys for navigation
-                if (e.key === 'ArrowRight' && !document.getElementById('next-button').disabled) {
-                    nextStep();
-                } else if (e.key === 'ArrowLeft' && !document.getElementById('prev-button').disabled) {
-                    previousStep();
-                }
+                comboIndex.textContent = index + 1;
+                deadFactor.textContent = combo.deadFactor.toFixed(2);
+                liveFactor.textContent = combo.liveFactor.toFixed(2);
+                windFactor.textContent = combo.windFactor.toFixed(2);
+                snowFactor.textContent = combo.snowFactor.toFixed(2);
             });
         }
         
-        // Check for saved preferences
-        function checkSavedPreferences() {
-            // Check if dark mode was previously enabled
-            const darkModePref = localStorage.getItem('darkMode');
-            if (darkModePref === 'true') {
-                toggleDarkMode();
-            }
+        // Generate fabrication instructions (placeholder)
+        function generateFabricationInstructions(section, connection, connectionData) {
+            let instructions = `Fabrication Instructions for ${section.size} Member:\n`;
+            
+            // Section details
+            instructions += `- Cut ${section.size} to length ${section.length} mm.\n`;
+            instructions += `- Drill holes for ${connection.numBolts} bolts of diameter ${connection.boltDiameter} mm.\n`;
+            instructions += `- Weld plate to section with ${connection.weldSize} mm ${connection.weldType}.\n`;
+            
+            // Connection details
+            instructions += `- Assemble ${connection.connectionType} using ${connection.boltGrade} bolts.\n`;
+            instructions += `- Tighten bolts to ${connection.shearCapacity.toFixed(2)} kN shear capacity.\n`;
+            
+            return instructions;
         }
         
-        // Toggle dark mode
-        function toggleDarkMode() {
-            document.body.classList.toggle('dark-mode');
-            isDarkMode = document.body.classList.contains('dark-mode');
-            
-            // Update icon
-            const themeToggle = document.querySelector('.theme-toggle');
-            themeToggle.innerHTML = isDarkMode ? '☀️' : '🌙';
-            
-            // Save preference
-            localStorage.setItem('darkMode', isDarkMode);
+        // Draw shop drawing (placeholder)
+        function drawShopDrawing(section, connection, connectionData) {
+            console.log('Drawing shop drawing for', section, connection, connectionData);
+            // Placeholder: real implementation would generate a CAD or SVG drawing
         }
-        
-        // Select design type
-        function selectDesignType(type) {
-            designType = type;
-            
-            // Update UI
-            document.getElementById('single-member').classList.remove('selected');
-            document.getElementById('frame-design').classList.remove('selected');
-            
-            document.getElementById(type + '-member').classList.add('selected');
-            document.getElementById('next-button').disabled = false;
-            
-            // Update ARIA attributes
-            document.getElementById('single-member').setAttribute('aria-pressed', type === 'single');
-            document.getElementById('frame-design').setAttribute('aria-pressed', type === 'frame');
-            
-            // Show notification
-            showNotification(`${type.charAt(0).toUpperCase() + type.slice(1)} member design selected`, 'success');
-        }
-        
-        // Navigate to next step
-        function nextStep() {
-            // Validate current step data
-            if (!validateCurrentStep()) {
-                showNotification('Please correct the errors before continuing', 'error');
-                return;
-            }
-            
-            // Save data from current step
-            saveCurrentStepData();
-            
-            if (currentStep < 4) {
-                currentStep++;
-                updateStepDisplay();
-                
-                // Initialize the new step
-                initializeStep(currentStep);
-                
-                // Scroll to top
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-            } else {
-                // Finish the design
-                downloadDesign();
-            }
-        }
-        
-        // Navigate to previous step
-        function previousStep() {
-            if (currentStep > 1) {
-                currentStep--;
-                updateStepDisplay();
-                
-                // Scroll to top
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-            }
-        }
-        
-        // Go to a specific step (for step indicators)
-        function goToStep(step) {
-            if (step >= 1 && step <= currentStep && step <= 4) {
-                currentStep = step;
-                updateStepDisplay();
-                
-                // Scroll to top
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-            }
-        }
-        
-        // Update step display
-        function updateStepDisplay() {
-            // Hide all steps
-            document.getElementById('step1').classList.add('hidden');
-            document.getElementById('step2').classList.add('hidden');
-            document.getElementById('step3').classList.add('hidden');
-            document.getElementById('step4').classList.add('hidden');
-            
-            // Show current step
-            document.getElementById('step' + currentStep).classList.remove('hidden');
-            
-            // Update step indicators
-            for (let i = 1; i <= 4; i++) {
-                const indicator = document.getElementById('step' + i + '-indicator');
-                indicator.classList.remove('active', 'completed');
-                indicator.setAttribute('aria-selected', i === currentStep);
-                indicator.tabIndex = i === currentStep ? 0 : -1;
-                
-                if (i < currentStep) {
-                    indicator.classList.add('completed');
-                } else if (i === currentStep) {
-                    indicator.classList.add('active');
-                }
-            }
-            
-            // Update connecting lines
-            for (let i = 1; i < 4; i++) {
-                const line = document.getElementById('line' + i + '-' + (i+1));
-                if (line) {
-                    if (i < currentStep) {
-                        line.classList.add('completed');
-                    } else {
-                        line.classList.remove('completed');
-                    }
-                }
-            }
-            
-            // Update navigation buttons
-            document.getElementById('prev-button').disabled = (currentStep === 1);
-            
-            const nextButton = document.getElementById('next-button');
-            nextButton.textContent = (currentStep === 4) ? 'Download' : 'Next';
-            
-            if (currentStep === 1) {
-                nextButton.disabled = (designType === null);
-            } else {
-                nextButton.disabled = false;
-            }
-        }
-        
-        // Initialize a step
-        function initializeStep(step) {
-            switch (step) {
-                case 2:
-                    // Member specifications
-                    if (designType === 'single') {
-                        document.getElementById('single-member-form').classList.remove('hidden');
-                        document.getElementById('frame-design-form').classList.add('hidden');
-                    } else {
-                        document.getElementById('single-member-form').classList.add('hidden');
-                        document.getElementById('frame-design-form').classList.remove('hidden');
-                    }
-                    break;
-                    
-                case 3:
-                    // Initialize loading forms
-                    toggleLoadingType('simple');
-                    break;
-                    
-                case 4:
-                    // Generate results
-                    generateResults();
-                    initializeVisualization();
-                    break;
-                    
-                default:
-                    break;
-            }
-        }
-        
-        // Validate current step
-        function validateCurrentStep() {
-            let isValid = true;
-            
-            switch (currentStep) {
-                case 1:
-                    // Validate design type selection
-                    isValid = designType !== null;
-                    break;
-                    
-                case 2:
-                    // Validate member specifications
-                    if (designType === 'single') {
-                        // Validate member length
-                        const memberLength = document.getElementById('member-length').value;
-                        if (memberLength < 100) {
-                            isValid = false;
-                        }
-                    } else {
-                        // Validate frame dimensions if a frame is uploaded
-                        if (uploadedImage) {
-                            const frameWidth = document.getElementById('frame-width').value;
-                            const frameHeight = document.getElementById('frame-height').value;
-                            if (frameWidth < 1000 || frameHeight < 1000) {
-                                isValid = false;
-                            }
-                        } else {
-                            isValid = false;
-                            showNotification('Please upload a frame sketch', 'error');
-                        }
-                    }
-                    break;
-                    
-                case 3:
-                    // Validate loading information
-                    const deadLoad = parseFloat(document.getElementById('dead-load').value);
-                    const liveLoad = parseFloat(document.getElementById('live-load').value);
-                    
-                    if (isNaN(deadLoad) || deadLoad < 0 || isNaN(liveLoad) || liveLoad < 0) {
-                        isValid = false;
-                    }
-                    break;
-                    
-                default:
-                    break;
-            }
-            
-            return isValid;
-        }
-        
-        // Validate individual input
-        function validateInput(e) {
-            const input = e.target;
-            const value = parseFloat(input.value);
-            const min = parseFloat(input.min);
-            
-            if (isNaN(value) || value < min) {
-                input.setCustomValidity('Invalid value');
-                input.classList.add('invalid');
-            } else {
-                input.setCustomValidity('');
-                input.classList.remove('invalid');
-            }
-        }
-        
-        // Save data from the current step
-        function saveCurrentStepData() {
-            switch (currentStep) {
-                case 2:
-                    // Member specifications
-                    if (designType === 'single') {
-                        sectionData = {
-                            memberType: document.getElementById('member-type').value,
-                            sectionType: document.getElementById('section-type').value,
-                            sectionSize: document.getElementById('section-size').value,
-                            length: parseFloat(document.getElementById('member-length').value),
-                            steelGrade: document.getElementById('steel-grade').value
-                        };
-                        
-                        // Find section in database
-                        sectionData.section = findSection(sectionData.sectionType, sectionData.sectionSize);
-                        
-                        // Get advanced connection data
-                        connectionData = {
-                            connectionType: document.getElementById('connection-type').value,
-                            connectionMethod: document.getElementById('connection-method').value,
-                            boltDiameter: document.getElementById('bolt-diameter').value,
-                            boltGrade: document.getElementById('bolt-grade').value,
-                            numBolts: parseInt(document.getElementById('num-bolts').value),
-                            edgeDistance: parseFloat(document.getElementById('edge-distance').value),
-                            weldSize: parseFloat(document.getElementById('weld-size').value),
-                            weldType: document.getElementById('weld-type').value
-                        };
-                    } else {
-                        // Frame data
-                        connectionData = {
-                            connectionType: document.getElementById('frame-connection-type').value,
-                            connectionMethod: document.getElementById('frame-connection-method').value,
-                            frameWidth: parseFloat(document.getElementById('frame-width').value),
-                            frameHeight: parseFloat(document.getElementById('frame-height').value)
-                        };
-                    }
-                    break;
-                    
-                case 3:
-                    // Loading conditions
-                    const loadingType = document.querySelector('input[name="loading-type"]:checked').value;
-                    
-                    if (loadingType === 'simple') {
-                        loadingData = {
-                            deadLoad: parseFloat(document.getElementById('dead-load').value),
-                            liveLoad: parseFloat(document.getElementById('live-load').value),
-                            windLoad: parseFloat(document.getElementById('wind-load').value),
-                            snowLoad: parseFloat(document.getElementById('snow-load').value),
-                            loadType: document.getElementById('load-type').value
-                        };
-                        
-                        if (loadingData.loadType === 'point') {
-                            loadingData.pointPosition = parseInt(document.getElementById('point-load-position').value) / 100;
-                        }
-                    } else {
-                        // Advanced loading data
-                        loadingData = {
-                            advanced: true,
-                            includeSelfWeight: document.getElementById('include-self-weight').checked,
-                            permanentDistributed: parseFloat(document.getElementById('permanent-distributed-load').value),
-                            permanentPoint: parseFloat(document.getElementById('permanent-point-load').value),
-                            permanentPointPosition: parseFloat(document.getElementById('permanent-point-load
+    </script>
+</body>
+</html>
